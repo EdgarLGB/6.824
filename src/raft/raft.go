@@ -82,7 +82,6 @@ type Raft struct {
 // return currentTerm and whether this server
 // believes it is the leader.
 func (rf *Raft) GetState() (int, bool) {
-
 	var term int
 	var isleader bool
 	// Your code here (2A).
@@ -180,19 +179,20 @@ type RequestVoteReply struct {
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (2A, 2B).
 	term, _ := rf.GetState()
-	if term > args.Term {
+	if term >= args.Term {
+		// Stale request or the current server has already voted
 		reply.VoteGranted = false
 		reply.Term = term
-	} else if term < args.Term {
-		rf.mu.Lock()
-		rf.votedFor = args.CandidateId
-		rf.status = Follower
-		rf.currentTerm = args.Term
-		rf.mu.Unlock()
-
-		reply.VoteGranted = true
-		reply.Term = args.Term
+		return
 	}
+	rf.mu.Lock()
+	rf.votedFor = args.CandidateId
+	rf.status = Follower
+	rf.currentTerm = args.Term
+	rf.mu.Unlock()
+
+	reply.VoteGranted = true
+	reply.Term = args.Term
 }
 
 type AppendEntriesArgs struct {
@@ -208,18 +208,19 @@ type AppendEntriesReply struct {
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
 	term, _ := rf.GetState()
 	if term > args.Term {
+		// Stale request
 		reply.Success = false
 		reply.Term = term
-	} else {
-		rf.mu.Lock()
-		rf.status = Follower
-		rf.currentTerm = args.Term
-		rf.votedFor = args.LeaderId
-		rf.mu.Unlock()
-
-		reply.Success = true
-		reply.Term = args.Term
+		return
 	}
+	rf.mu.Lock()
+	rf.status = Follower
+	rf.currentTerm = args.Term
+	rf.votedFor = args.LeaderId
+	rf.mu.Unlock()
+
+	reply.Success = true
+	reply.Term = args.Term
 }
 
 func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *AppendEntriesReply) bool {
@@ -341,7 +342,6 @@ func (rf *Raft) ticker() {
 
 		// Parallely send RequestVote rpc call to other peers
 		vote := 1
-		alivePeers := len(rf.peers) - 1
 		for i := range rf.peers {
 			if i == rf.me {
 				continue
@@ -353,7 +353,7 @@ func (rf *Raft) ticker() {
 				}
 
 				reply := &RequestVoteReply{}
-				ok := rf.sendRequestVote(index, args, reply)
+				rf.sendRequestVote(index, args, reply)
 
 				rf.mu.Lock()
 				defer rf.mu.Unlock()
@@ -362,20 +362,20 @@ func (rf *Raft) ticker() {
 				}
 				if reply.Term > rf.currentTerm {
 					rf.currentTerm = reply.Term
+					// If the current term is not the latest, fallback to follower
+					rf.status = Follower
+					return
 				}
 
-				if !ok {
-					alivePeers -= 1
+				if rf.status != Candidate {
 					return
 				}
 
 				if reply.VoteGranted {
 					vote += 1
-				} else {
-					rf.status = Follower
 				}
 
-				if rf.status == Candidate && vote > (alivePeers+1)/2 {
+				if vote > len(rf.peers) / 2 {
 					rf.status = Leader
 					//fmt.Printf("Candidate %v is elected at term %v\n", rf.me, rf.currentTerm)
 				}
@@ -412,12 +412,10 @@ func (rf *Raft) heartbeat() {
 						rf.currentTerm = reply.Term
 						rf.status = Follower
 					}
-
 				}(i)
 			}
 		}
 		time.Sleep(time.Duration(10) * time.Millisecond)
-
 	}
 }
 
@@ -440,8 +438,6 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.me = me
 
 	// Your initialization code here (2A, 2B, 2C).
-	rf.votedFor = -1
-
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
 
